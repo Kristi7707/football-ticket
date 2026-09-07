@@ -11,6 +11,7 @@ Usage:
 
 import json
 import math
+import os
 import smtplib
 import sys
 import time
@@ -28,8 +29,25 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 # ---------------------------------------------------------------- config
 
 def load_config():
-    with open(SCRIPT_DIR / "config.json", "r", encoding="utf-8") as f:
-        return json.load(f)
+    path = SCRIPT_DIR / "config.json"
+    if not path.exists():
+        # e.g. in GitHub Actions, where the real config is not committed
+        path = SCRIPT_DIR / "config.example.json"
+    with open(path, "r", encoding="utf-8") as f:
+        cfg = json.load(f)
+
+    # Environment variables (GitHub Actions secrets) override the file
+    if os.environ.get("API_FOOTBALL_KEY"):
+        cfg["api_key"] = os.environ["API_FOOTBALL_KEY"]
+    if os.environ.get("EMAIL_USERNAME"):
+        cfg["email"]["username"] = os.environ["EMAIL_USERNAME"]
+        cfg["email"]["from"] = os.environ["EMAIL_USERNAME"]
+    if os.environ.get("EMAIL_TO"):
+        cfg["email"]["to"] = os.environ["EMAIL_TO"]
+    if os.environ.get("EMAIL_PASSWORD"):
+        cfg["email"]["password"] = os.environ["EMAIL_PASSWORD"]
+        cfg["email"]["enabled"] = True
+    return cfg
 
 
 # ---------------------------------------------------------------- API

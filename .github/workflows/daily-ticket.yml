@@ -1,0 +1,30 @@
+name: Daily Football Ticket
+
+on:
+  schedule:
+    # 07:00 UTC = 09:00 Central European Summer Time (08:00 in winter).
+    # GitHub's scheduler can start jobs a few minutes late.
+    - cron: "0 7 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  ticket:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and email the daily ticket
+        env:
+          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+          EMAIL_USERNAME: ${{ secrets.EMAIL_USERNAME }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: python3 main.py
+
+      - name: Save ticket as run artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ticket
+          path: tickets/
+          if-no-files-found: ignore

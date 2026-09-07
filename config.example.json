@@ -1,0 +1,22 @@
+{
+  "api_key": "PUT-YOUR-API-FOOTBALL-KEY-HERE",
+  "timezone": "Europe/Berlin",
+  "stake": 10,
+  "max_picks": 7,
+  "min_pick_probability": 0.68,
+  "min_odds_per_pick": 1.15,
+  "include_corners": true,
+  "max_corners_picks": 2,
+  "max_picks_per_market": 3,
+  "max_matches_analyzed": 30,
+  "league_ids": [39, 40, 140, 141, 135, 136, 78, 79, 61, 62, 88, 94, 144, 203, 197, 106, 119, 2, 3, 848],
+  "email": {
+    "enabled": false,
+    "smtp_host": "smtp.gmail.com",
+    "smtp_port": 587,
+    "username": "your.address@gmail.com",
+    "password": "PUT-APP-PASSWORD-HERE",
+    "from": "your.address@gmail.com",
+    "to": "recipient@example.com"
+  }
+}

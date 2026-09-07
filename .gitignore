@@ -1,0 +1,7 @@
+# Secrets - never commit the real config (API key + email password)
+config.json
+
+# Runtime output
+tickets/
+run_log.txt
+__pycache__/

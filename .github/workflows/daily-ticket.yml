@@ -6,8 +6,6 @@ on:
     # GitHub's scheduler can start jobs a few minutes late.
     - cron: "0 7 * * *"
   workflow_dispatch: {}
-  push:
-    branches: [main]
 
 jobs:
   ticket:

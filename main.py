@@ -164,8 +164,19 @@ def fd_get(cfg, path, params=None):
     if params:
         url += "?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(url, headers={"X-Auth-Token": cfg["football_data_token"]})
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    attempts = 4
+    for attempt in range(1, attempts + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            # 429 = rate limit, 5xx = server trouble: both are worth retrying
+            if e.code not in (429, 500, 502, 503, 504) or attempt == attempts:
+                raise
+        except (urllib.error.URLError, ConnectionError, TimeoutError):
+            if attempt == attempts:
+                raise
+        time.sleep(10 * attempt)
 
 
 def outcome_probs(lam_home, lam_away, max_goals=10):
@@ -224,7 +235,11 @@ def fetch_matches_footballdata(cfg):
     tables = {}
     for code in sorted({f["competition"]["code"] for f, _ in fixtures}):
         time.sleep(6.5)  # free plan: 10 requests/minute
-        st = fd_get(cfg, "/competitions/{}/standings".format(code))
+        try:
+            st = fd_get(cfg, "/competitions/{}/standings".format(code))
+        except (urllib.error.URLError, ConnectionError, TimeoutError) as e:
+            print("  skipping {}: could not load standings ({})".format(code, e))
+            continue
         rows = {}
         for block in st.get("standings", []):
             if block.get("type") != "TOTAL":

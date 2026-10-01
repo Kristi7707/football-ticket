@@ -33,7 +33,7 @@ def load_config():
     if not path.exists():
         # e.g. in GitHub Actions, where the real config is not committed
         path = SCRIPT_DIR / "config.example.json"
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, "r", encoding="utf-8-sig") as f:
         cfg = json.load(f)
 
     # Environment variables (GitHub Actions secrets) override the file
@@ -198,6 +198,8 @@ def build_candidates(match, cfg):
     lam = match["lam_home"] + match["lam_away"]
     add("Goals", "Over 1.5 goals", 1.0 - poisson_cdf(lam, 1))
     add("Goals", "Over 2.5 goals", 1.0 - poisson_cdf(lam, 2))
+    add("Goals", "Under 2.5 goals", poisson_cdf(lam, 2))
+    add("Goals", "Over 3.5 goals", 1.0 - poisson_cdf(lam, 3))
     add("Goals", "Under 3.5 goals", poisson_cdf(lam, 3))
     add("Goals", "Under 4.5 goals", poisson_cdf(lam, 4))
 
@@ -209,44 +211,103 @@ def build_candidates(match, cfg):
     # Corners (league-average based prior; most matches clear 7.5 corners)
     if cfg.get("include_corners", True):
         add("Corners", "Over 7.5 total corners", 0.78)
+        add("Corners", "Over 9.5 total corners", 0.52)
+        add("Corners", "Under 11.5 total corners", 0.66)
 
     return cands
 
 
+def combo_stats(combo):
+    odds = 1.0
+    prob = 1.0
+    for c in combo:
+        odds *= c["odds"]
+        prob *= c["prob"]
+    return odds, prob
+
+
+def combo_valid(combo, cfg):
+    """One pick per match is guaranteed by construction; enforce market caps."""
+    caps = {"Corners": cfg.get("max_corners_picks", 2)}
+    default_cap = cfg.get("max_picks_per_market", 3)
+    counts = {}
+    for c in combo:
+        counts[c["category"]] = counts.get(c["category"], 0) + 1
+        if counts[c["category"]] > caps.get(c["category"], default_cap):
+            return False
+    return True
+
+
+def combo_score(combo, cfg):
+    """Higher is better. Inside the target odds range: maximize hit probability.
+    Outside it: heavily penalized by how far away it is (in log space)."""
+    odds, prob = combo_stats(combo)
+    lo, hi = cfg["target_odds_min"], cfg["target_odds_max"]
+    if odds < lo:
+        gap = math.log(lo / odds)
+    elif odds > hi:
+        gap = math.log(odds / hi)
+    else:
+        gap = 0.0
+    return math.log(prob) - 100.0 * gap
+
+
 def select_picks(matches, cfg):
-    """Pick the strongest selection per match, then keep the best 7 overall."""
-    best_per_match = []
+    """Find 5-7 picks (one per match) whose combined odds land in the target range,
+    maximizing the chance the whole ticket wins."""
+    import random
+
+    per_match = []
     for m in matches:
         cands = [c for c in build_candidates(m, cfg)
                  if c["prob"] >= cfg["min_pick_probability"]
                  and c["odds"] >= cfg["min_odds_per_pick"]]
         if cands:
-            cands.sort(key=lambda c: c["prob"], reverse=True)
-            best_per_match.append(cands)
+            per_match.append(cands)
 
-    # Greedy: highest-probability picks first, with per-market caps for variety
-    max_per_market = cfg.get("max_picks_per_market", 3)
-    max_corners = cfg.get("max_corners_picks", 2)
-    market_counts = {}
-    picks = []
+    min_picks = cfg.get("min_picks", 5)
+    max_picks = min(cfg.get("max_picks", 7), 7)
+    if len(per_match) < min_picks:
+        return []
 
-    flat = sorted((c for cands in best_per_match for c in cands[:3]),
-                  key=lambda c: c["prob"], reverse=True)
-    used_matches = set()
-    for c in flat:
-        key = id(c["match"])
-        if key in used_matches:
-            continue
-        cap = max_corners if c["category"] == "Corners" else max_per_market
-        if market_counts.get(c["category"], 0) >= cap:
-            continue
-        picks.append(c)
-        used_matches.add(key)
-        market_counts[c["category"]] = market_counts.get(c["category"], 0) + 1
-        if len(picks) >= cfg["max_picks"]:
-            break
+    rng = random.Random(date.today().toordinal())
+    best, best_score = None, None
 
-    return picks
+    for n in range(min_picks, min(max_picks, len(per_match)) + 1):
+        for _ in range(150):
+            chosen = rng.sample(range(len(per_match)), n)
+            combo = [rng.choice(per_match[i]) for i in chosen]
+            if not combo_valid(combo, cfg):
+                continue
+            # Hill-climb: swap one pick (same match, or a different unused match)
+            improved = True
+            while improved:
+                improved = False
+                cur = combo_score(combo, cfg)
+                used = {id(c["match"]) for c in combo}
+                for idx in range(len(combo)):
+                    options = []
+                    for cands in per_match:
+                        mid = id(cands[0]["match"])
+                        if mid in used and mid != id(combo[idx]["match"]):
+                            continue
+                        options.extend(cands)
+                    for opt in options:
+                        trial = combo[:idx] + [opt] + combo[idx + 1:]
+                        if not combo_valid(trial, cfg):
+                            continue
+                        s = combo_score(trial, cfg)
+                        if s > cur + 1e-9:
+                            combo, cur, improved = trial, s, True
+                            used = {id(c["match"]) for c in combo}
+            s = combo_score(combo, cfg)
+            if best_score is None or s > best_score:
+                best, best_score = combo, s
+
+    if best is None:
+        return []
+    best.sort(key=lambda c: c["match"]["kickoff"])
+    return best
 
 
 # ---------------------------------------------------------------- output
@@ -386,11 +447,15 @@ def main():
         sys.exit(0)
 
     picks = select_picks(matches, cfg)
-    if len(picks) < cfg["max_picks"]:
-        print("NOTE: only {} picks met the confidence threshold today.".format(len(picks)))
     if not picks:
-        print("No picks met the confidence threshold - no ticket generated.")
+        print("Fewer than {} usable matches today - no ticket generated.".format(
+            cfg.get("min_picks", 5)))
         sys.exit(0)
+    odds, _ = combo_stats(picks)
+    if not cfg["target_odds_min"] <= odds <= cfg["target_odds_max"]:
+        print("NOTE: today's matches could not reach the {}-{} odds target; "
+              "closest ticket is {:.1f}.".format(cfg["target_odds_min"],
+                                                  cfg["target_odds_max"], odds))
 
     print_summary(picks, cfg)
 

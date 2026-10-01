@@ -51,17 +51,19 @@ Output of each run is appended to `run_log.txt`; every ticket is also saved in `
 | Setting | Meaning |
 |---|---|
 | `stake` | Ticket stake (minimum 10 is enforced) |
-| `max_picks` | Picks per ticket (max 7) |
-| `min_pick_probability` | Only picks at/above this confidence are used (default 0.68) |
-| `min_odds_per_pick` | Skips picks whose odds would be too tiny (default 1.15) |
+| `min_picks` / `max_picks` | Picks per ticket (5 to 7, one per match) |
+| `target_odds_min` / `target_odds_max` | Combined odds the ticket should land in (default 30-50) |
+| `min_pick_probability` | Only picks at/above this confidence are considered (default 0.42) |
+| `min_odds_per_pick` | Skips picks whose odds would be too tiny (default 1.3) |
 | `include_corners` / `max_corners_picks` | Allow corner picks and cap how many |
 | `league_ids` | Which leagues to scan (API-Football league IDs); empty = all |
 | `max_matches_analyzed` | Cap on fixtures analyzed per day (keeps within free API limits) |
 
-## Honest note on the "very low losing rate"
+## Honest note on high-odds tickets
 
-Each pick is chosen at roughly 68–95% confidence, but a 7-leg accumulator multiplies
-the risks: seven picks at 80% each win together only ~21% of the time. The email shows
-the **ticket hit probability** so you always see the real number. Lower `max_picks`
-(e.g. 3–4) if you want tickets that win more often at lower odds. Never bet more than
-you can afford to lose.
+Combined odds of 30-50 across 5-7 matches need each pick at roughly 1.6-2.2 odds, i.e.
+about 42-57% likely. Multiplied together, such a ticket wins only around 1-3% of the time.
+The email shows the **ticket hit probability** so you always see the real number.
+For tickets that win more often, set `target_odds_min`/`target_odds_max` lower
+(e.g. 3-6) and raise `min_pick_probability` (e.g. 0.68). Corner probabilities are
+league-average priors, not per-match data. Odds are estimates; check your bookmaker.

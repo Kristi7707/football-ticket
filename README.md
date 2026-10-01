@@ -1,7 +1,7 @@
 # Daily Football Ticket
 
-Analyzes today's football fixtures, builds a ticket of up to **7 high-confidence picks**
-(stake **10+**), saves it as an HTML file, and **emails it to you every day**.
+Analyzes today's football fixtures, builds a ticket of **5-7 picks** with combined odds
+of about 30-50 (stake **10+**), saves it as an HTML file, and **emails it to you every day**.
 
 Markets used: **1X2, Double Chance, Over/Under goals, BTTS, Corners**.
 Handicap markets are never used. Football only.
@@ -9,12 +9,19 @@ Handicap markets are never used. Football only.
 ## Requirements
 
 - Python 3.8+ (no extra packages needed — standard library only)
-- A free API key from [API-Football](https://dashboard.api-football.com) (100 requests/day free)
+- A free token from [football-data.org](https://www.football-data.org/client/register)
+  (free tier never expires: Premier League, Championship, Bundesliga, Serie A, La Liga,
+  Ligue 1, Eredivisie, Primeira Liga, Brazilian Serie A, Champions League)
+
+Probabilities are computed from each team's goals scored/conceded in the league table
+(attack and defence strength vs. league average, plus home advantage). The older
+API-Football provider is still supported: set `"provider": "api-football"` and `api_key`.
 
 ## Setup
 
-1. **API key**: create a free account at https://dashboard.api-football.com,
-   copy your API key, and paste it into `config.json` → `"api_key"`.
+1. **Token**: register at https://www.football-data.org/client/register, copy the token
+   from the email they send, and paste it into `config.json` → `"football_data_token"`.
+   For the GitHub Actions run, add it as the repository secret `FOOTBALL_DATA_TOKEN`.
 
 2. **Email** (optional but recommended): in `config.json` → `"email"`:
    - Set `"enabled": true`

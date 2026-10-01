@@ -18,7 +18,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from email.mime.text import MIMEText
 from pathlib import Path
 
@@ -39,6 +39,8 @@ def load_config():
     # Environment variables (GitHub Actions secrets) override the file
     if os.environ.get("API_FOOTBALL_KEY"):
         cfg["api_key"] = os.environ["API_FOOTBALL_KEY"]
+    if os.environ.get("FOOTBALL_DATA_TOKEN"):
+        cfg["football_data_token"] = os.environ["FOOTBALL_DATA_TOKEN"]
     if os.environ.get("EMAIL_USERNAME"):
         cfg["email"]["username"] = os.environ["EMAIL_USERNAME"]
         cfg["email"]["from"] = os.environ["EMAIL_USERNAME"]
@@ -149,6 +151,116 @@ def fetch_matches(cfg):
                                           f["teams"]["away"]["name"]))
         time.sleep(6.5)  # respect the 10 requests/minute free-plan limit
 
+    return matches
+
+
+# ---------------------------------------------------------------- football-data.org
+
+FD_BASE = "https://api.football-data.org/v4"
+
+
+def fd_get(cfg, path, params=None):
+    url = FD_BASE + path
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+    req = urllib.request.Request(url, headers={"X-Auth-Token": cfg["football_data_token"]})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def outcome_probs(lam_home, lam_away, max_goals=10):
+    """Home/draw/away probabilities from independent Poisson scorelines."""
+    p_h = p_d = p_a = 0.0
+    home = [math.exp(-lam_home) * lam_home ** i / math.factorial(i) for i in range(max_goals + 1)]
+    away = [math.exp(-lam_away) * lam_away ** j / math.factorial(j) for j in range(max_goals + 1)]
+    for i, ph in enumerate(home):
+        for j, pa in enumerate(away):
+            if i > j:
+                p_h += ph * pa
+            elif i == j:
+                p_d += ph * pa
+            else:
+                p_a += ph * pa
+    total = p_h + p_d + p_a
+    return p_h / total, p_d / total, p_a / total
+
+
+def local_kickoff(utc_iso, tz_name):
+    """Return (local date, 'HH:MM') for a UTC timestamp like 2026-10-01T18:30:00Z."""
+    dt = datetime.strptime(utc_iso, "%Y-%m-%dT%H:%M:%SZ")
+    try:
+        from datetime import timezone
+        from zoneinfo import ZoneInfo
+        dt = dt.replace(tzinfo=timezone.utc).astimezone(ZoneInfo(tz_name))
+    except Exception:
+        pass  # no timezone database available: fall back to UTC
+    return dt.date(), dt.strftime("%H:%M")
+
+
+def fetch_matches_footballdata(cfg):
+    """Today's fixtures from football-data.org; probabilities from league-table
+    goal rates (attack/defence strength vs. league average, with home advantage)."""
+    today = date.today()
+    codes = ",".join(cfg.get("competitions", ["PL", "ELC", "BL1", "SA", "PD", "FL1",
+                                               "DED", "PPL", "BSA", "CL"]))
+    print("Fetching fixtures for {} ...".format(today.isoformat()))
+    data = fd_get(cfg, "/matches", {
+        "competitions": codes,
+        "dateFrom": today.isoformat(),
+        "dateTo": (today + timedelta(days=1)).isoformat(),
+    })
+
+    fixtures = []
+    for f in data.get("matches", []):
+        if f.get("status") not in ("SCHEDULED", "TIMED"):
+            continue
+        local_date, kickoff = local_kickoff(f["utcDate"], cfg["timezone"])
+        if local_date != today:
+            continue
+        fixtures.append((f, kickoff))
+    fixtures = fixtures[:cfg.get("max_matches_analyzed", 30)]
+    print("Found {} fixtures today.".format(len(fixtures)))
+
+    tables = {}
+    for code in sorted({f["competition"]["code"] for f, _ in fixtures}):
+        time.sleep(6.5)  # free plan: 10 requests/minute
+        st = fd_get(cfg, "/competitions/{}/standings".format(code))
+        rows = {}
+        for block in st.get("standings", []):
+            if block.get("type") != "TOTAL":
+                continue
+            for row in block.get("table", []):
+                rows[row["team"]["id"]] = row
+        tables[code] = rows
+
+    matches = []
+    for f, kickoff in fixtures:
+        rows = tables.get(f["competition"]["code"], {})
+        h, a = rows.get(f["homeTeam"]["id"]), rows.get(f["awayTeam"]["id"])
+        if not h or not a or h["playedGames"] < 3 or a["playedGames"] < 3:
+            continue  # not enough games to estimate team strength
+
+        games = sum(r["playedGames"] for r in rows.values())
+        league_avg = sum(r["goalsFor"] for r in rows.values()) / max(games, 1)
+
+        def strength(row, key):
+            raw = (row[key] / row["playedGames"]) / league_avg
+            w = row["playedGames"] / (row["playedGames"] + 5.0)  # shrink early-season noise
+            return w * raw + (1 - w)
+
+        lam_home = league_avg * 1.15 * strength(h, "goalsFor") * strength(a, "goalsAgainst")
+        lam_away = league_avg * 0.87 * strength(a, "goalsFor") * strength(h, "goalsAgainst")
+        p_home, p_draw, p_away = outcome_probs(lam_home, lam_away)
+
+        matches.append({
+            "home": f["homeTeam"].get("shortName") or f["homeTeam"]["name"],
+            "away": f["awayTeam"].get("shortName") or f["awayTeam"]["name"],
+            "league": f["competition"]["name"],
+            "kickoff": kickoff,
+            "p_home": p_home, "p_draw": p_draw, "p_away": p_away,
+            "lam_home": lam_home, "lam_away": lam_away,
+        })
+        print("  {} vs {}".format(matches[-1]["home"], matches[-1]["away"]))
     return matches
 
 
@@ -435,12 +547,19 @@ def main():
         print("DEMO MODE - using built-in sample matches (no API calls, no email).")
         matches = demo_matches()
     else:
-        if not cfg.get("api_key") or "PUT-YOUR" in cfg["api_key"]:
-            print("ERROR: no API key in config.json.")
-            print("Get a free key at https://dashboard.api-football.com and paste it")
-            print("into the api_key field, or run with --demo to see sample output.")
-            sys.exit(1)
-        matches = fetch_matches(cfg)
+        if cfg.get("provider", "football-data") == "api-football":
+            if not cfg.get("api_key") or "PUT-YOUR" in cfg["api_key"]:
+                print("ERROR: no API key in config.json (api_key).")
+                sys.exit(1)
+            matches = fetch_matches(cfg)
+        else:
+            token = cfg.get("football_data_token", "")
+            if not token or "PUT-YOUR" in token:
+                print("ERROR: no football-data.org token in config.json.")
+                print("Get a free token at https://www.football-data.org/client/register")
+                print("and paste it into football_data_token, or run with --demo.")
+                sys.exit(1)
+            matches = fetch_matches_footballdata(cfg)
 
     if not matches:
         print("No suitable matches found today - no ticket generated.")

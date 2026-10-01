@@ -1,4 +1,4 @@
-﻿{
+{
     "api_key":  "PUT-YOUR-API-FOOTBALL-KEY-HERE",
     "timezone":  "Europe/Berlin",
     "stake":  10,
@@ -42,5 +42,19 @@
               },
     "min_picks":  5,
     "target_odds_min":  30,
-    "target_odds_max":  50
+    "target_odds_max":  50,
+    "provider":  "football-data",
+    "football_data_token":  "PUT-YOUR-FOOTBALL-DATA-TOKEN-HERE",
+    "competitions":  [
+                         "PL",
+                         "ELC",
+                         "BL1",
+                         "SA",
+                         "PD",
+                         "FL1",
+                         "DED",
+                         "PPL",
+                         "BSA",
+                         "CL"
+                     ]
 }

@@ -1,6 +1,6 @@
 {
     "api_key":  "PUT-YOUR-API-FOOTBALL-KEY-HERE",
-    "timezone":  "Europe/Berlin",
+    "timezone":  "Europe/Tirane",
     "stake":  10,
     "max_picks":  7,
     "min_pick_probability":  0.42,

@@ -1,12 +1,11 @@
 name: Daily Football Ticket
 
 on:
-  schedule:
-    # 04:23 UTC = 06:23 Central European Summer Time (05:23 in winter).
-    # GitHub delays scheduled runs, especially at the top of the hour; the old
-    # 07:00 UTC slot started 5-8 hours late (12:00-15:00 UTC). An early, off-peak
-    # minute leaves room for that delay so the email lands before kickoffs.
-    - cron: "23 4 * * *"
+  # No `schedule:` on purpose. GitHub delays scheduled runs under load (this one
+  # started 5-8 hours late), so the daily run is started at exactly 13:00
+  # Europe/Tirane by an external timer calling the workflow_dispatch API.
+  # See "Daily automation" in the README. Do not add a cron here as well, or the
+  # ticket would be emailed twice.
   workflow_dispatch: {}
 
 jobs:

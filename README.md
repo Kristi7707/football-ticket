@@ -3,6 +3,9 @@
 Analyzes today's football fixtures, builds a ticket of **5-7 picks** with combined odds
 of about 30-50 (stake **10+**), saves it as an HTML file, and **emails it to you every day**.
 
+On days without enough usable matches you get a short "no ticket today" email instead,
+so a quiet inbox never means a silent failure.
+
 Markets used: **1X2, Double Chance, Over/Under goals, BTTS, Corners**.
 Handicap markets are never used. Football only.
 

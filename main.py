@@ -513,10 +513,11 @@ def print_summary(picks, cfg):
     print("=" * 74)
 
 
-def send_email(cfg, html):
+def send_email(cfg, html, subject=None):
     email_cfg = cfg["email"]
     msg = MIMEText(html, "html", "utf-8")
-    msg["Subject"] = "Daily Football Ticket - {}".format(date.today().strftime("%d %B %Y"))
+    msg["Subject"] = subject or "Daily Football Ticket - {}".format(
+        date.today().strftime("%d %B %Y"))
     msg["From"] = email_cfg["from"]
     msg["To"] = email_cfg["to"]
 
@@ -526,6 +527,29 @@ def send_email(cfg, html):
         server.login(email_cfg["username"], email_cfg["password"].replace(" ", ""))
         server.sendmail(email_cfg["from"], [email_cfg["to"]], msg.as_string())
     print("Email sent to {}".format(email_cfg["to"]))
+
+
+def build_no_ticket_html(reason):
+    return """
+<div style="font-family:Segoe UI,Arial,sans-serif;max-width:680px;margin:auto">
+  <h2 style="color:#1a5c2e">Daily Football Ticket - {today}</h2>
+  <p>No ticket today.</p>
+  <p style="color:#666">{reason}</p>
+</div>""".format(today=date.today().strftime("%d %B %Y"), reason=reason)
+
+
+def exit_without_ticket(cfg, reason, send):
+    """End a run that produced no ticket. The run still counts as a success, so
+    when emailing is on, tell the user why instead of leaving them guessing."""
+    print(reason)
+    if send and cfg["email"].get("enabled"):
+        subject = "Daily Football Ticket - {} - no ticket today".format(
+            date.today().strftime("%d %B %Y"))
+        try:
+            send_email(cfg, build_no_ticket_html(reason), subject)
+        except Exception as e:
+            print("Email failed: {}".format(e))
+    sys.exit(0)
 
 
 # ---------------------------------------------------------------- demo data
@@ -576,15 +600,14 @@ def main():
                 sys.exit(1)
             matches = fetch_matches_footballdata(cfg)
 
+    send = not (demo or dry_run)
     if not matches:
-        print("No suitable matches found today - no ticket generated.")
-        sys.exit(0)
+        exit_without_ticket(cfg, "No suitable matches found today - no ticket generated.", send)
 
     picks = select_picks(matches, cfg)
     if not picks:
-        print("Fewer than {} usable matches today - no ticket generated.".format(
-            cfg.get("min_picks", 5)))
-        sys.exit(0)
+        exit_without_ticket(cfg, "Fewer than {} usable matches today - no ticket generated.".format(
+            cfg.get("min_picks", 5)), send)
     odds, _ = combo_stats(picks)
     if not cfg["target_odds_min"] <= odds <= cfg["target_odds_max"]:
         print("NOTE: today's matches could not reach the {}-{} odds target; "

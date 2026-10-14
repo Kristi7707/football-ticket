@@ -208,10 +208,12 @@ def local_kickoff(utc_iso, tz_name):
     return dt.date(), dt.strftime("%H:%M")
 
 
-# Continental cups. Their own table says little (a team has played 1-3 games), so these
+# Continental cups. A cup table says little until both teams have played a few cup
+# games (about the 4th league-phase matchday); until then, and for teams short of games,
 # fixtures are rated from each team's domestic league table instead. Europa League (EL)
 # and Conference League (UCL) need a paid football-data plan; the free plan has only CL.
 EURO_CODES = {"CL", "EL", "UCL"}
+PAID_CODES = {"EL", "UCL"}
 DEFAULT_COMPETITIONS = ["PL", "ELC", "BL1", "SA", "PD", "FL1", "DED", "PPL", "BSA",
                         "CL", "EL", "UCL"]
 MIN_GAMES = 3  # games a team needs before its table row says anything about its strength
@@ -230,8 +232,8 @@ def team_strength(row, league_avg):
     1.0 for teams with few games, to damp early-season noise."""
     n = row["playedGames"]
     w = n / (n + 5.0)
-    attack = w * (row["goalsFor"] / n) / league_avg + (1 - w)
-    defence = w * (row["goalsAgainst"] / n) / league_avg + (1 - w)
+    attack = w * ((row["goalsFor"] / n) / league_avg) + (1 - w)
+    defence = w * ((row["goalsAgainst"] / n) / league_avg) + (1 - w)
     return attack, defence
 
 
@@ -259,30 +261,41 @@ def load_standings(cfg, code):
 
 
 def fetch_fixture_list(cfg, codes, today):
-    """Raw fixtures for today and tomorrow in the given competitions. If the plan does
-    not allow some of them and the API refuses the combined request, ask one competition
-    at a time and skip the refused ones."""
+    """Raw fixtures for today and tomorrow in the given competitions.
+
+    football-data.org answers HTTP 403 when the plan excludes a requested competition
+    (EL and UCL on the free plan). Then ask again without those two and try each of them
+    on its own, skipping the refused ones. Any other error - above all HTTP 400, which
+    is what a bad or revoked token returns - is raised, so the run fails visibly instead
+    of reporting an empty day."""
     params = {"dateFrom": today.isoformat(),
               "dateTo": (today + timedelta(days=1)).isoformat()}
-    try:
-        return fd_get(cfg, "/matches", dict(params, competitions=",".join(codes))).get(
+
+    def ask(group):
+        return fd_get(cfg, "/matches", dict(params, competitions=",".join(group))).get(
             "matches", [])
+
+    try:
+        return ask(codes)
     except urllib.error.HTTPError as e:
-        if e.code not in (400, 403):
+        if e.code != 403:
             raise
-        print("  fixtures request refused (HTTP {}); asking one competition at a time"
-              .format(e.code))
+        print("  fixtures request refused (HTTP 403): the plan excludes some competitions")
+    core = [c for c in codes if c not in PAID_CODES]
     found = []
+    if core:
+        time.sleep(6.5)
+        found = ask(core)  # refused again: a token/plan problem, not just EL/UCL - raise
     for code in codes:
+        if code not in PAID_CODES:
+            continue
         time.sleep(6.5)
         try:
-            found += fd_get(cfg, "/matches", dict(params, competitions=code)).get(
-                "matches", [])
+            found += ask([code])
         except urllib.error.HTTPError as e:
-            if e.code not in (400, 403):
+            if e.code != 403:
                 raise
-            print("  skipping {}: not available on your football-data plan (HTTP {})"
-                  .format(code, e.code))
+            print("  skipping {}: not available on your football-data plan".format(code))
     return found
 
 
@@ -291,38 +304,60 @@ def fetch_matches_footballdata(cfg):
     rates (attack/defence strength vs. league average, with home advantage).
 
     Domestic fixtures use their own league table. Continental fixtures (CL/EL/UCL) use
-    each team's domestic league table: strength is measured against its own league's
-    average, so the model does not know how strong one league is compared with another.
-    Teams whose domestic league is not loaded are skipped."""
+    the cup table once both teams have MIN_GAMES cup games, otherwise each team's
+    domestic league table: strength is then measured against its own league's average,
+    so the model does not know how strong one league is compared with another. Teams
+    whose domestic league is not loaded are skipped."""
     today = date.today()
     wanted = cfg.get("competitions", DEFAULT_COMPETITIONS)
     print("Fetching fixtures for {} ...".format(today.isoformat()))
 
+    raw = fetch_fixture_list(cfg, wanted, today)
+    raw.sort(key=lambda m: m.get("utcDate") or "")  # kickoff order, whatever the request mix
     fixtures = []
-    for f in fetch_fixture_list(cfg, wanted, today):
+    for f in raw:
         if f.get("status") not in ("SCHEDULED", "TIMED"):
             continue
         local_date, kickoff = local_kickoff(f["utcDate"], cfg["timezone"])
         if local_date != today:
             continue
         fixtures.append((f, kickoff))
-    fixtures = fixtures[:cfg.get("max_matches_analyzed", 30)]
     print("Found {} fixtures today.".format(len(fixtures)))
+    if fixtures:
+        counts = {}
+        for f, _ in fixtures:
+            code = f["competition"]["code"]
+            counts[code] = counts.get(code, 0) + 1
+        print("  by competition: {}".format(
+            ", ".join("{} {}".format(c, n) for c, n in sorted(counts.items()))))
+    cap = cfg.get("max_matches_analyzed", 30)
+    if len(fixtures) > cap:
+        dropped = ", ".join("{} vs {}".format(
+            f["homeTeam"].get("shortName") or f["homeTeam"].get("name") or "TBD",
+            f["awayTeam"].get("shortName") or f["awayTeam"].get("name") or "TBD")
+            for f, _ in fixtures[cap:])
+        print("  analyzing only the first {} (max_matches_analyzed); not analyzed: {}".format(
+            cap, dropped))
+        fixtures = fixtures[:cap]
 
-    # Standings: the leagues playing today, plus every domestic league when a
-    # continental fixture needs team strengths from home. Cup tables are never used.
+    # Standings: every competition playing today, plus every domestic league when a
+    # continental fixture may need team strengths from home.
     playing = {f["competition"]["code"] for f, _ in fixtures}
-    needed = playing - EURO_CODES
+    needed = set(playing)
     if playing & EURO_CODES:
         needed |= {c for c in wanted if c not in EURO_CODES}
-    tables = {}
+    tables, failed = {}, set()
     for code in sorted(needed):
         rows = load_standings(cfg, code)
-        if rows is not None:
+        if rows is None:
+            failed.add(code)
+        else:
             tables[code] = rows
 
     domestic = {}  # team id -> (table row, league goal rate)
-    for rows in tables.values():
+    for code, rows in tables.items():
+        if code in EURO_CODES:
+            continue
         rate = table_goal_rate(rows)
         for team_id, row in rows.items():
             if row["playedGames"] >= MIN_GAMES:
@@ -332,19 +367,28 @@ def fetch_matches_footballdata(cfg):
     for f, kickoff in fixtures:
         code = f["competition"]["code"]
         home_team, away_team = f["homeTeam"], f["awayTeam"]
-        home_name = home_team.get("shortName") or home_team["name"]
-        away_name = away_team.get("shortName") or away_team["name"]
+        home_name = home_team.get("shortName") or home_team.get("name") or "TBD"
+        away_name = away_team.get("shortName") or away_team.get("name") or "TBD"
         label = "{} vs {} [{}]".format(home_name, away_name, code)
 
         if code in EURO_CODES:
-            h, a = domestic.get(home_team["id"]), domestic.get(away_team["id"])
-            if not h or not a:
-                missing = [n for n, x in ((home_name, h), (away_name, a)) if not x]
-                print("  skipped {}: no domestic league table with {}+ games for {}".format(
-                    label, MIN_GAMES, " and ".join(missing)))
+            cup = tables.get(code, {})
+            ch, ca = cup.get(home_team["id"]), cup.get(away_team["id"])
+            dh, da = domestic.get(home_team["id"]), domestic.get(away_team["id"])
+            if ch and ca and ch["playedGames"] >= MIN_GAMES and ca["playedGames"] >= MIN_GAMES:
+                avg = table_goal_rate(cup)
+                home_s, away_s = team_strength(ch, avg), team_strength(ca, avg)
+            elif dh and da:
+                avg = (dh[1] + da[1]) / 2.0
+                home_s, away_s = team_strength(dh[0], dh[1]), team_strength(da[0], da[1])
+            else:
+                missing = [n for n, x in ((home_name, dh), (away_name, da)) if not x]
+                note = (" (standings failed to load for: {})".format(", ".join(sorted(failed)))
+                        if failed else "")
+                print("  skipped {}: cup table not ready and no domestic league table "
+                      "with {}+ games for {}{}".format(label, MIN_GAMES,
+                                                       " and ".join(missing), note))
                 continue
-            avg = (h[1] + a[1]) / 2.0
-            home_s, away_s = team_strength(h[0], h[1]), team_strength(a[0], a[1])
         else:
             rows = tables.get(code, {})
             h, a = rows.get(home_team["id"]), rows.get(away_team["id"])

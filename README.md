@@ -22,17 +22,22 @@ API-Football provider is still supported: set `"provider": "api-football"` and `
 
 ### European cups
 
-- **Champions League (`CL`)** is on the free plan. A team has played only 1-3 cup games
-  for most of the league phase, so cup matches are rated from each team's **domestic
-  league table** instead. A match is skipped (and the log says why) when one of its teams
-  plays in a league the app has no table for, e.g. Norway, Turkey or Scotland.
-  This is an approximation: each team is measured against *its own* league's average, so
-  the model does not know how strong one league is compared with another.
+- **Champions League (`CL`)** is on the free plan. Once both teams have played 3+ cup
+  games (from about the 4th league-phase matchday) the cup table is used, as for any
+  league. Before that - and for any team short of games - the match is rated from each
+  team's **domestic league table**. A match is skipped (and the log says why) when a team
+  has neither, e.g. a club from Norway, Turkey or Scotland early in the competition.
+  The domestic fallback is an approximation: each team is measured against *its own*
+  league's average, so the model does not know how strong one league is compared with
+  another.
 - **Europa League (`EL`)** and **Conference League (`UCL`)** are in the `competitions`
   list, but football-data.org only serves them on a paid plan. On the free plan they
-  simply produce no fixtures (the log says "not available on your plan" if the API
-  refuses them). To rate more teams, add their domestic leagues to `competitions`
-  (also paid plans), e.g. `"SPL"` for Scotland or `"BJL"` for Belgium.
+  simply produce no fixtures; if the API refuses them the log says "not available on your
+  football-data plan". The log also shows `by competition: ...` so you can see what was
+  found. To rate more teams, add their domestic leagues to `competitions` (also paid
+  plans), e.g. `"SPL"` for Scotland or `"BJL"` for Belgium.
+- An invalid or revoked football-data token (HTTP 400) makes the run **fail** rather than
+  report an empty day, so GitHub flags it.
 
 ## Setup
 
@@ -64,7 +69,8 @@ API-Football provider is still supported: set `"provider": "api-football"` and `
 GitHub's own scheduler can start a run hours late, so the workflow has no `schedule:`.
 Instead a free timer at [cron-job.org](https://cron-job.org) starts it at exactly 13:00
 `Europe/Tirane` every day (daylight saving is handled by the timezone setting). A started
-run takes about a minute, so the email arrives a minute or two after 13:00.
+run takes one to three minutes (the free plan allows 10 requests a minute, so the app
+paces itself), so the email arrives shortly after 13:00.
 
 1. **GitHub token**: GitHub → Settings → Developer settings → Personal access tokens →
    *Fine-grained tokens* → Generate. Repository access: **only** `football-ticket`.

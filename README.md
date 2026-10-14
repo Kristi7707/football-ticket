@@ -20,6 +20,20 @@ Probabilities are computed from each team's goals scored/conceded in the league 
 (attack and defence strength vs. league average, plus home advantage). The older
 API-Football provider is still supported: set `"provider": "api-football"` and `api_key`.
 
+### European cups
+
+- **Champions League (`CL`)** is on the free plan. A team has played only 1-3 cup games
+  for most of the league phase, so cup matches are rated from each team's **domestic
+  league table** instead. A match is skipped (and the log says why) when one of its teams
+  plays in a league the app has no table for, e.g. Norway, Turkey or Scotland.
+  This is an approximation: each team is measured against *its own* league's average, so
+  the model does not know how strong one league is compared with another.
+- **Europa League (`EL`)** and **Conference League (`UCL`)** are in the `competitions`
+  list, but football-data.org only serves them on a paid plan. On the free plan they
+  simply produce no fixtures (the log says "not available on your plan" if the API
+  refuses them). To rate more teams, add their domestic leagues to `competitions`
+  (also paid plans), e.g. `"SPL"` for Scotland or `"BJL"` for Belgium.
+
 ## Setup
 
 1. **Token**: register at https://www.football-data.org/client/register, copy the token

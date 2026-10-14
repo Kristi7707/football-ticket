@@ -208,21 +208,98 @@ def local_kickoff(utc_iso, tz_name):
     return dt.date(), dt.strftime("%H:%M")
 
 
+# Continental cups. Their own table says little (a team has played 1-3 games), so these
+# fixtures are rated from each team's domestic league table instead. Europa League (EL)
+# and Conference League (UCL) need a paid football-data plan; the free plan has only CL.
+EURO_CODES = {"CL", "EL", "UCL"}
+DEFAULT_COMPETITIONS = ["PL", "ELC", "BL1", "SA", "PD", "FL1", "DED", "PPL", "BSA",
+                        "CL", "EL", "UCL"]
+MIN_GAMES = 3  # games a team needs before its table row says anything about its strength
+
+
+def table_goal_rate(rows):
+    """Average goals scored per team per game in a league table."""
+    games = sum(r["playedGames"] for r in rows.values())
+    goals = sum(r["goalsFor"] for r in rows.values())
+    rate = goals / games if games else 0.0
+    return rate if rate > 0 else 1.3
+
+
+def team_strength(row, league_avg):
+    """(attack, defence) relative to the league average; 1.0 is average. Shrunk toward
+    1.0 for teams with few games, to damp early-season noise."""
+    n = row["playedGames"]
+    w = n / (n + 5.0)
+    attack = w * (row["goalsFor"] / n) / league_avg + (1 - w)
+    defence = w * (row["goalsAgainst"] / n) / league_avg + (1 - w)
+    return attack, defence
+
+
+def expected_goals(avg, home, away):
+    """Poisson means for (home, away), with home advantage. `home` and `away` are
+    (attack, defence) pairs."""
+    return avg * 1.15 * home[0] * away[1], avg * 0.87 * away[0] * home[1]
+
+
+def load_standings(cfg, code):
+    """The TOTAL standings of a competition as {team id: row}, or None if unavailable."""
+    time.sleep(6.5)  # free plan: 10 requests/minute
+    try:
+        st = fd_get(cfg, "/competitions/{}/standings".format(code))
+    except (urllib.error.URLError, ConnectionError, TimeoutError) as e:
+        print("  skipping {}: could not load standings ({})".format(code, e))
+        return None
+    rows = {}
+    for block in st.get("standings", []):
+        if block.get("type") != "TOTAL":
+            continue
+        for row in block.get("table", []):
+            rows[row["team"]["id"]] = row
+    return rows
+
+
+def fetch_fixture_list(cfg, codes, today):
+    """Raw fixtures for today and tomorrow in the given competitions. If the plan does
+    not allow some of them and the API refuses the combined request, ask one competition
+    at a time and skip the refused ones."""
+    params = {"dateFrom": today.isoformat(),
+              "dateTo": (today + timedelta(days=1)).isoformat()}
+    try:
+        return fd_get(cfg, "/matches", dict(params, competitions=",".join(codes))).get(
+            "matches", [])
+    except urllib.error.HTTPError as e:
+        if e.code not in (400, 403):
+            raise
+        print("  fixtures request refused (HTTP {}); asking one competition at a time"
+              .format(e.code))
+    found = []
+    for code in codes:
+        time.sleep(6.5)
+        try:
+            found += fd_get(cfg, "/matches", dict(params, competitions=code)).get(
+                "matches", [])
+        except urllib.error.HTTPError as e:
+            if e.code not in (400, 403):
+                raise
+            print("  skipping {}: not available on your football-data plan (HTTP {})"
+                  .format(code, e.code))
+    return found
+
+
 def fetch_matches_footballdata(cfg):
-    """Today's fixtures from football-data.org; probabilities from league-table
-    goal rates (attack/defence strength vs. league average, with home advantage)."""
+    """Today's fixtures from football-data.org; probabilities from league-table goal
+    rates (attack/defence strength vs. league average, with home advantage).
+
+    Domestic fixtures use their own league table. Continental fixtures (CL/EL/UCL) use
+    each team's domestic league table: strength is measured against its own league's
+    average, so the model does not know how strong one league is compared with another.
+    Teams whose domestic league is not loaded are skipped."""
     today = date.today()
-    codes = ",".join(cfg.get("competitions", ["PL", "ELC", "BL1", "SA", "PD", "FL1",
-                                               "DED", "PPL", "BSA", "CL"]))
+    wanted = cfg.get("competitions", DEFAULT_COMPETITIONS)
     print("Fetching fixtures for {} ...".format(today.isoformat()))
-    data = fd_get(cfg, "/matches", {
-        "competitions": codes,
-        "dateFrom": today.isoformat(),
-        "dateTo": (today + timedelta(days=1)).isoformat(),
-    })
 
     fixtures = []
-    for f in data.get("matches", []):
+    for f in fetch_fixture_list(cfg, wanted, today):
         if f.get("status") not in ("SCHEDULED", "TIMED"):
             continue
         local_date, kickoff = local_kickoff(f["utcDate"], cfg["timezone"])
@@ -232,61 +309,69 @@ def fetch_matches_footballdata(cfg):
     fixtures = fixtures[:cfg.get("max_matches_analyzed", 30)]
     print("Found {} fixtures today.".format(len(fixtures)))
 
+    # Standings: the leagues playing today, plus every domestic league when a
+    # continental fixture needs team strengths from home. Cup tables are never used.
+    playing = {f["competition"]["code"] for f, _ in fixtures}
+    needed = playing - EURO_CODES
+    if playing & EURO_CODES:
+        needed |= {c for c in wanted if c not in EURO_CODES}
     tables = {}
-    for code in sorted({f["competition"]["code"] for f, _ in fixtures}):
-        time.sleep(6.5)  # free plan: 10 requests/minute
-        try:
-            st = fd_get(cfg, "/competitions/{}/standings".format(code))
-        except (urllib.error.URLError, ConnectionError, TimeoutError) as e:
-            print("  skipping {}: could not load standings ({})".format(code, e))
-            continue
-        rows = {}
-        for block in st.get("standings", []):
-            if block.get("type") != "TOTAL":
-                continue
-            for row in block.get("table", []):
-                rows[row["team"]["id"]] = row
-        tables[code] = rows
+    for code in sorted(needed):
+        rows = load_standings(cfg, code)
+        if rows is not None:
+            tables[code] = rows
+
+    domestic = {}  # team id -> (table row, league goal rate)
+    for rows in tables.values():
+        rate = table_goal_rate(rows)
+        for team_id, row in rows.items():
+            if row["playedGames"] >= MIN_GAMES:
+                domestic.setdefault(team_id, (row, rate))
 
     matches = []
     for f, kickoff in fixtures:
         code = f["competition"]["code"]
-        rows = tables.get(code, {})
-        h, a = rows.get(f["homeTeam"]["id"]), rows.get(f["awayTeam"]["id"])
-        label = "{} vs {} [{}]".format(
-            f["homeTeam"].get("shortName") or f["homeTeam"]["name"],
-            f["awayTeam"].get("shortName") or f["awayTeam"]["name"], code)
-        if not h or not a:
-            print("  skipped {}: team not in the {} standings ({} teams loaded)".format(
-                label, code, len(rows)))
-            continue
-        if h["playedGames"] < 3 or a["playedGames"] < 3:
-            # not enough games to estimate team strength
-            print("  skipped {}: fewer than 3 games played ({} / {})".format(
-                label, h["playedGames"], a["playedGames"]))
-            continue
+        home_team, away_team = f["homeTeam"], f["awayTeam"]
+        home_name = home_team.get("shortName") or home_team["name"]
+        away_name = away_team.get("shortName") or away_team["name"]
+        label = "{} vs {} [{}]".format(home_name, away_name, code)
 
-        games = sum(r["playedGames"] for r in rows.values())
-        league_avg = sum(r["goalsFor"] for r in rows.values()) / max(games, 1)
+        if code in EURO_CODES:
+            h, a = domestic.get(home_team["id"]), domestic.get(away_team["id"])
+            if not h or not a:
+                missing = [n for n, x in ((home_name, h), (away_name, a)) if not x]
+                print("  skipped {}: no domestic league table with {}+ games for {}".format(
+                    label, MIN_GAMES, " and ".join(missing)))
+                continue
+            avg = (h[1] + a[1]) / 2.0
+            home_s, away_s = team_strength(h[0], h[1]), team_strength(a[0], a[1])
+        else:
+            rows = tables.get(code, {})
+            h, a = rows.get(home_team["id"]), rows.get(away_team["id"])
+            if not h or not a:
+                print("  skipped {}: team not in the {} standings ({} teams loaded)".format(
+                    label, code, len(rows)))
+                continue
+            if h["playedGames"] < MIN_GAMES or a["playedGames"] < MIN_GAMES:
+                # not enough games to estimate team strength
+                print("  skipped {}: fewer than {} games played ({} / {})".format(
+                    label, MIN_GAMES, h["playedGames"], a["playedGames"]))
+                continue
+            avg = table_goal_rate(rows)
+            home_s, away_s = team_strength(h, avg), team_strength(a, avg)
 
-        def strength(row, key):
-            raw = (row[key] / row["playedGames"]) / league_avg
-            w = row["playedGames"] / (row["playedGames"] + 5.0)  # shrink early-season noise
-            return w * raw + (1 - w)
-
-        lam_home = league_avg * 1.15 * strength(h, "goalsFor") * strength(a, "goalsAgainst")
-        lam_away = league_avg * 0.87 * strength(a, "goalsFor") * strength(h, "goalsAgainst")
+        lam_home, lam_away = expected_goals(avg, home_s, away_s)
         p_home, p_draw, p_away = outcome_probs(lam_home, lam_away)
 
         matches.append({
-            "home": f["homeTeam"].get("shortName") or f["homeTeam"]["name"],
-            "away": f["awayTeam"].get("shortName") or f["awayTeam"]["name"],
+            "home": home_name,
+            "away": away_name,
             "league": f["competition"]["name"],
             "kickoff": kickoff,
             "p_home": p_home, "p_draw": p_draw, "p_away": p_away,
             "lam_home": lam_home, "lam_away": lam_away,
         })
-        print("  {} vs {}".format(matches[-1]["home"], matches[-1]["away"]))
+        print("  {} vs {} [{}]".format(home_name, away_name, code))
     return matches
 
 

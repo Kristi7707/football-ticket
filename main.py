@@ -250,10 +250,21 @@ def fetch_matches_footballdata(cfg):
 
     matches = []
     for f, kickoff in fixtures:
-        rows = tables.get(f["competition"]["code"], {})
+        code = f["competition"]["code"]
+        rows = tables.get(code, {})
         h, a = rows.get(f["homeTeam"]["id"]), rows.get(f["awayTeam"]["id"])
-        if not h or not a or h["playedGames"] < 3 or a["playedGames"] < 3:
-            continue  # not enough games to estimate team strength
+        label = "{} vs {} [{}]".format(
+            f["homeTeam"].get("shortName") or f["homeTeam"]["name"],
+            f["awayTeam"].get("shortName") or f["awayTeam"]["name"], code)
+        if not h or not a:
+            print("  skipped {}: team not in the {} standings ({} teams loaded)".format(
+                label, code, len(rows)))
+            continue
+        if h["playedGames"] < 3 or a["playedGames"] < 3:
+            # not enough games to estimate team strength
+            print("  skipped {}: fewer than 3 games played ({} / {})".format(
+                label, h["playedGames"], a["playedGames"]))
+            continue
 
         games = sum(r["playedGames"] for r in rows.values())
         league_avg = sum(r["goalsFor"] for r in rows.values()) / max(games, 1)

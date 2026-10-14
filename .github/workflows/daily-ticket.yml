@@ -6,7 +6,12 @@ on:
   # Europe/Tirane by an external timer calling the workflow_dispatch API.
   # See "Daily automation" in the README. Do not add a cron here as well, or the
   # ticket would be emailed twice.
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Analyze and log only - do not send any email"
+        type: boolean
+        default: false
 
 jobs:
   ticket:
@@ -21,7 +26,14 @@ jobs:
           EMAIL_USERNAME: ${{ secrets.EMAIL_USERNAME }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
-        run: python3 main.py
+          # Empty when the timer starts the run through the API without inputs.
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          if [ "$DRY_RUN" = "true" ]; then
+            python3 main.py --dry-run
+          else
+            python3 main.py
+          fi
 
       - name: Save ticket as run artifact
         if: always()

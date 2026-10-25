@@ -209,14 +209,61 @@ def local_kickoff(utc_iso, tz_name):
 
 
 # Continental cups. A cup table says little until both teams have played a few cup
-# games (about the 4th league-phase matchday); until then, and for teams short of games,
-# fixtures are rated from each team's domestic league table instead. Europa League (EL)
-# and Conference League (UCL) need a paid football-data plan; the free plan has only CL.
+# games, so cup fixtures are rated from each team's DOMESTIC league form when both clubs
+# have one (this beat the cup-table method on real Champions League results), and from the
+# cup table only as a cautious fallback. Europa League (EL) and Conference League (UCL)
+# need a paid football-data plan; the free plan has only CL.
 EURO_CODES = {"CL", "EL", "UCL"}
 PAID_CODES = {"EL", "UCL"}
 DEFAULT_COMPETITIONS = ["PL", "ELC", "BL1", "SA", "PD", "FL1", "DED", "PPL", "BSA",
                         "CL", "EL", "UCL"]
 MIN_GAMES = 3  # games a team needs before its table row says anything about its strength
+
+# Rating model. Chosen and checked against ~3,700 real matches (PL, ELC, BL1, SA, PD, FL1,
+# DED, PPL, BSA; 2025 and 2026 seasons) with tools/backtest.py; see the README.
+LEGACY_K = 5.0         # shrink weight (in games) when last season's table is unavailable
+PRIOR_K = 20.0         # games' worth of trust in last season's rating
+PRIOR_KEEP = 0.7       # share of last season's distance from average that carries over
+NEW_TEAM = (0.9, 1.1)  # (attack, defence) assumed for a team with no row last season
+DC_RHO = -0.10         # Dixon-Coles: 0-0 and 1-1 happen more often than plain Poisson says
+EURO_TRUST = 0.75      # pull cup fixtures rated from domestic form toward the average rate
+CUP_ONLY_TRUST = 0.5   # same, for the weaker cup-table fallback
+
+# Calibration: p' = sigmoid(a + b * logit(p)), fitted on the same matches. b < 1 means the
+# raw model was overconfident (all goals markets); b ~ 1 means it was about right (results).
+CALIBRATION = {
+    "1 (Home win)": (-0.012, 1.086),
+    "X (Draw)": (-0.362, 0.648),
+    "2 (Away win)": (0.153, 1.144),
+    "1X (Home or Draw)": (-0.153, 1.144),
+    "X2 (Draw or Away)": (0.012, 1.086),
+    "12 (Home or Away)": (0.362, 0.648),
+    "Over 1.5 goals": (0.557, 0.553),
+    "Over 2.5 goals": (0.106, 0.543),
+    "Under 2.5 goals": (-0.106, 0.543),
+    "Over 3.5 goals": (-0.304, 0.647),
+    "Under 3.5 goals": (0.304, 0.647),
+    "Under 4.5 goals": (0.649, 0.684),
+    "Both teams to score: Yes": (0.132, 0.583),
+    "Both teams to score: No": (-0.132, 0.583),
+}
+# Average rate of each market in that sample (what cup fixtures are pulled toward).
+BASE_RATE = {
+    "1 (Home win)": 0.4411,
+    "X (Draw)": 0.2619,
+    "2 (Away win)": 0.2970,
+    "1X (Home or Draw)": 0.7030,
+    "X2 (Draw or Away)": 0.5589,
+    "12 (Home or Away)": 0.7381,
+    "Over 1.5 goals": 0.7724,
+    "Over 2.5 goals": 0.5364,
+    "Under 2.5 goals": 0.4636,
+    "Over 3.5 goals": 0.3002,
+    "Under 3.5 goals": 0.6998,
+    "Under 4.5 goals": 0.8610,
+    "Both teams to score: Yes": 0.5536,
+    "Both teams to score: No": 0.4464,
+}
 
 
 def table_goal_rate(rows):
@@ -227,13 +274,34 @@ def table_goal_rate(rows):
     return rate if rate > 0 else 1.3
 
 
-def team_strength(row, league_avg):
-    """(attack, defence) relative to the league average; 1.0 is average. Shrunk toward
-    1.0 for teams with few games, to damp early-season noise."""
+def season_prior(rows):
+    """{team id: (attack, defence)} from a finished season's table, relative to that
+    league's average (1.0 = average)."""
+    avg = table_goal_rate(rows)
+    out = {}
+    for team_id, r in rows.items():
+        n = r["playedGames"]
+        if n <= 0:
+            continue
+        w = n / (n + 5.0)
+        out[team_id] = (w * ((r["goalsFor"] / n) / avg) + (1 - w),
+                        w * ((r["goalsAgainst"] / n) / avg) + (1 - w))
+    return out
+
+
+def team_strength(row, team_id, league_avg, prior=None):
+    """(attack, defence) relative to the league average; 1.0 is average. Pulled toward
+    last season's rating when `prior` (from season_prior) is given, otherwise toward 1.0."""
     n = row["playedGames"]
-    w = n / (n + 5.0)
-    attack = w * ((row["goalsFor"] / n) / league_avg) + (1 - w)
-    defence = w * ((row["goalsAgainst"] / n) / league_avg) + (1 - w)
+    if prior is None:
+        k, target = LEGACY_K, (1.0, 1.0)
+    else:
+        k = PRIOR_K
+        p = prior.get(team_id)
+        target = NEW_TEAM if p is None else (1.0 + PRIOR_KEEP * (p[0] - 1.0),
+                                             1.0 + PRIOR_KEEP * (p[1] - 1.0))
+    attack = (k * target[0] + n * ((row["goalsFor"] / n) / league_avg)) / (k + n)
+    defence = (k * target[1] + n * ((row["goalsAgainst"] / n) / league_avg)) / (k + n)
     return attack, defence
 
 
@@ -243,13 +311,85 @@ def expected_goals(avg, home, away):
     return avg * 1.15 * home[0] * away[1], avg * 0.87 * away[0] * home[1]
 
 
-def load_standings(cfg, code):
-    """The TOTAL standings of a competition as {team id: row}, or None if unavailable."""
+def _poisson_pmf(lam, kmax):
+    p = [math.exp(-lam)]
+    for k in range(1, kmax + 1):
+        p.append(p[-1] * lam / k)
+    return p
+
+
+def scoreline_markets(lam_home, lam_away, rho=DC_RHO, kmax=10):
+    """Raw probability of every market the app bets on, from the scoreline distribution."""
+    ph, pa = _poisson_pmf(lam_home, kmax), _poisson_pmf(lam_away, kmax)
+    g = [[ph[i] * pa[j] for j in range(kmax + 1)] for i in range(kmax + 1)]
+    if rho:
+        g[0][0] *= max(0.0, 1 - lam_home * lam_away * rho)
+        g[0][1] *= max(0.0, 1 + lam_home * rho)
+        g[1][0] *= max(0.0, 1 + lam_away * rho)
+        g[1][1] *= max(0.0, 1 - rho)
+    total = sum(map(sum, g))
+    home = draw = away = both = 0.0
+    goals_ge = [0.0] * 6  # goals_ge[k] = P(total goals >= k)
+    for i in range(kmax + 1):
+        for j in range(kmax + 1):
+            p = g[i][j] / total
+            if i > j:
+                home += p
+            elif i == j:
+                draw += p
+            else:
+                away += p
+            for k in range(1, 6):
+                if i + j >= k:
+                    goals_ge[k] += p
+            if i > 0 and j > 0:
+                both += p
+    return {
+        "1 (Home win)": home, "X (Draw)": draw, "2 (Away win)": away,
+        "1X (Home or Draw)": home + draw, "X2 (Draw or Away)": draw + away,
+        "12 (Home or Away)": home + away,
+        "Over 1.5 goals": goals_ge[2], "Over 2.5 goals": goals_ge[3],
+        "Under 2.5 goals": 1 - goals_ge[3], "Over 3.5 goals": goals_ge[4],
+        "Under 3.5 goals": 1 - goals_ge[4], "Under 4.5 goals": 1 - goals_ge[5],
+        "Both teams to score: Yes": both, "Both teams to score: No": 1 - both,
+    }
+
+
+def _logit(p):
+    p = min(max(p, 1e-6), 1 - 1e-6)
+    return math.log(p / (1 - p))
+
+
+def calibrate(label, p, trust=1.0):
+    """Turn a raw model probability into one that matches how often such picks really
+    won. trust < 1 additionally pulls it toward the market's average rate."""
+    a, b = CALIBRATION[label]
+    q = 1.0 / (1.0 + math.exp(-(a + b * _logit(p))))
+    if trust != 1.0:
+        base = _logit(BASE_RATE[label])
+        q = 1.0 / (1.0 + math.exp(-(base + trust * (_logit(q) - base))))
+    return q
+
+
+def season_start_year(st, code, today):
+    """First year of the season a standings response describes."""
+    try:
+        return int(st["season"]["startDate"][:4])
+    except (KeyError, TypeError, ValueError):
+        # BSA runs within a calendar year; the European leagues start in the summer
+        return today.year if code == "BSA" or today.month >= 7 else today.year - 1
+
+
+def load_standings(cfg, code, season=None):
+    """(TOTAL standings as {team id: row}, season start year) of a competition, for the
+    current season or the given one; None if unavailable."""
     time.sleep(6.5)  # free plan: 10 requests/minute
     try:
-        st = fd_get(cfg, "/competitions/{}/standings".format(code))
+        st = fd_get(cfg, "/competitions/{}/standings".format(code),
+                    {"season": season} if season else None)
     except (urllib.error.URLError, ConnectionError, TimeoutError) as e:
-        print("  skipping {}: could not load standings ({})".format(code, e))
+        print("  skipping {}{}: could not load standings ({})".format(
+            code, " {}".format(season) if season else "", e))
         return None
     rows = {}
     for block in st.get("standings", []):
@@ -257,7 +397,7 @@ def load_standings(cfg, code):
             continue
         for row in block.get("table", []):
             rows[row["team"]["id"]] = row
-    return rows
+    return rows, season_start_year(st, code, date.today())
 
 
 def fetch_fixture_list(cfg, codes, today):
@@ -300,14 +440,16 @@ def fetch_fixture_list(cfg, codes, today):
 
 
 def fetch_matches_footballdata(cfg):
-    """Today's fixtures from football-data.org; probabilities from league-table goal
-    rates (attack/defence strength vs. league average, with home advantage).
+    """Today's fixtures from football-data.org, rated from league tables.
 
-    Domestic fixtures use their own league table. Continental fixtures (CL/EL/UCL) use
-    the cup table once both teams have MIN_GAMES cup games, otherwise each team's
-    domestic league table: strength is then measured against its own league's average,
-    so the model does not know how strong one league is compared with another. Teams
-    whose domestic league is not loaded are skipped."""
+    Each team's strength is its goals scored/conceded per game versus its league's average,
+    pulled toward last season's final rating (see team_strength), turned into scoreline
+    probabilities and then calibrated against how often such picks really won
+    (see calibrate). Domestic fixtures use their own league. Continental fixtures
+    (CL/EL/UCL) use each club's domestic league when both clubs have one; strength is then
+    measured against its own league's average, so the model does not know how strong one
+    league is compared with another, and those probabilities are pulled toward the average.
+    Otherwise they use the cup table, more cautiously. Anything else is skipped."""
     today = date.today()
     wanted = cfg.get("competitions", DEFAULT_COMPETITIONS)
     print("Fetching fixtures for {} ...".format(today.isoformat()))
@@ -346,22 +488,31 @@ def fetch_matches_footballdata(cfg):
     needed = set(playing)
     if playing & EURO_CODES:
         needed |= {c for c in wanted if c not in EURO_CODES}
-    tables, failed = {}, set()
+    tables, years, failed = {}, {}, set()
     for code in sorted(needed):
-        rows = load_standings(cfg, code)
-        if rows is None:
+        loaded = load_standings(cfg, code)
+        if loaded is None:
             failed.add(code)
         else:
-            tables[code] = rows
+            tables[code], years[code] = loaded
 
-    domestic = {}  # team id -> (table row, league goal rate)
+    # Last season's final table of each domestic league: the starting point for ratings.
+    priors = {}
+    for code in sorted(c for c in tables if c not in EURO_CODES):
+        loaded = load_standings(cfg, code, season=years[code] - 1)
+        if loaded is None:
+            print("  {}: no last-season table, using plain ratings".format(code))
+        elif loaded[0]:
+            priors[code] = season_prior(loaded[0])
+
+    domestic = {}  # team id -> (table row, league goal rate, last-season prior or None)
     for code, rows in tables.items():
         if code in EURO_CODES:
             continue
         rate = table_goal_rate(rows)
         for team_id, row in rows.items():
             if row["playedGames"] >= MIN_GAMES:
-                domestic.setdefault(team_id, (row, rate))
+                domestic.setdefault(team_id, (row, rate, priors.get(code)))
 
     matches = []
     for f, kickoff in fixtures:
@@ -370,24 +521,30 @@ def fetch_matches_footballdata(cfg):
         home_name = home_team.get("shortName") or home_team.get("name") or "TBD"
         away_name = away_team.get("shortName") or away_team.get("name") or "TBD"
         label = "{} vs {} [{}]".format(home_name, away_name, code)
+        trust = 1.0
 
         if code in EURO_CODES:
             cup = tables.get(code, {})
             ch, ca = cup.get(home_team["id"]), cup.get(away_team["id"])
             dh, da = domestic.get(home_team["id"]), domestic.get(away_team["id"])
-            if ch and ca and ch["playedGames"] >= MIN_GAMES and ca["playedGames"] >= MIN_GAMES:
-                avg = table_goal_rate(cup)
-                home_s, away_s = team_strength(ch, avg), team_strength(ca, avg)
-            elif dh and da:
+            if dh and da:
                 avg = (dh[1] + da[1]) / 2.0
-                home_s, away_s = team_strength(dh[0], dh[1]), team_strength(da[0], da[1])
+                home_s = team_strength(dh[0], home_team["id"], dh[1], dh[2])
+                away_s = team_strength(da[0], away_team["id"], da[1], da[2])
+                trust = EURO_TRUST
+            elif (ch and ca and ch["playedGames"] >= MIN_GAMES
+                  and ca["playedGames"] >= MIN_GAMES):
+                avg = table_goal_rate(cup)
+                home_s = team_strength(ch, home_team["id"], avg)
+                away_s = team_strength(ca, away_team["id"], avg)
+                trust = CUP_ONLY_TRUST
             else:
                 missing = [n for n, x in ((home_name, dh), (away_name, da)) if not x]
                 note = (" (standings failed to load for: {})".format(", ".join(sorted(failed)))
                         if failed else "")
-                print("  skipped {}: cup table not ready and no domestic league table "
-                      "with {}+ games for {}{}".format(label, MIN_GAMES,
-                                                       " and ".join(missing), note))
+                print("  skipped {}: no domestic league table with {}+ games for {}, "
+                      "and the cup table is not ready{}".format(
+                          label, MIN_GAMES, " and ".join(missing), note))
                 continue
         else:
             rows = tables.get(code, {})
@@ -402,18 +559,23 @@ def fetch_matches_footballdata(cfg):
                     label, MIN_GAMES, h["playedGames"], a["playedGames"]))
                 continue
             avg = table_goal_rate(rows)
-            home_s, away_s = team_strength(h, avg), team_strength(a, avg)
+            home_s = team_strength(h, home_team["id"], avg, priors.get(code))
+            away_s = team_strength(a, away_team["id"], avg, priors.get(code))
 
         lam_home, lam_away = expected_goals(avg, home_s, away_s)
-        p_home, p_draw, p_away = outcome_probs(lam_home, lam_away)
+        probs = {lab: calibrate(lab, p, trust)
+                 for lab, p in scoreline_markets(lam_home, lam_away).items()}
+        result = [probs["1 (Home win)"], probs["X (Draw)"], probs["2 (Away win)"]]
 
         matches.append({
             "home": home_name,
             "away": away_name,
             "league": f["competition"]["name"],
             "kickoff": kickoff,
-            "p_home": p_home, "p_draw": p_draw, "p_away": p_away,
+            "p_home": result[0] / sum(result), "p_draw": result[1] / sum(result),
+            "p_away": result[2] / sum(result),
             "lam_home": lam_home, "lam_away": lam_away,
+            "probs": probs,
         })
         print("  {} vs {} [{}]".format(home_name, away_name, code))
     return matches
@@ -434,6 +596,16 @@ def est_odds(prob):
     return max(1.05, round(0.92 / prob, 2))
 
 
+MARKETS = [  # (category, label): every market the app can bet on, apart from corners
+    ("1X2", "1 (Home win)"), ("1X2", "X (Draw)"), ("1X2", "2 (Away win)"),
+    ("Double Chance", "1X (Home or Draw)"), ("Double Chance", "X2 (Draw or Away)"),
+    ("Double Chance", "12 (Home or Away)"),
+    ("Goals", "Over 1.5 goals"), ("Goals", "Over 2.5 goals"), ("Goals", "Under 2.5 goals"),
+    ("Goals", "Over 3.5 goals"), ("Goals", "Under 3.5 goals"), ("Goals", "Under 4.5 goals"),
+    ("BTTS", "Both teams to score: Yes"), ("BTTS", "Both teams to score: No"),
+]
+
+
 def build_candidates(match, cfg):
     """All allowed-market picks for one match, each with an estimated probability."""
     cands = []
@@ -451,29 +623,35 @@ def build_candidates(match, cfg):
             "prob": prob, "odds": est_odds(prob),
         })
 
-    # 1X2
-    add("1X2", "1 (Home win)", p_h)
-    add("1X2", "X (Draw)", p_d)
-    add("1X2", "2 (Away win)", p_a)
+    probs = match.get("probs")
+    if probs:
+        # Calibrated probabilities from the football-data model (see calibrate()).
+        for category, label in MARKETS:
+            add(category, label, probs[label])
+    else:
+        # 1X2
+        add("1X2", "1 (Home win)", p_h)
+        add("1X2", "X (Draw)", p_d)
+        add("1X2", "2 (Away win)", p_a)
 
-    # Double chance
-    add("Double Chance", "1X (Home or Draw)", p_h + p_d)
-    add("Double Chance", "X2 (Draw or Away)", p_d + p_a)
-    add("Double Chance", "12 (Home or Away)", p_h + p_a)
+        # Double chance
+        add("Double Chance", "1X (Home or Draw)", p_h + p_d)
+        add("Double Chance", "X2 (Draw or Away)", p_d + p_a)
+        add("Double Chance", "12 (Home or Away)", p_h + p_a)
 
-    # Goals over/under (Poisson on expected total goals)
-    lam = match["lam_home"] + match["lam_away"]
-    add("Goals", "Over 1.5 goals", 1.0 - poisson_cdf(lam, 1))
-    add("Goals", "Over 2.5 goals", 1.0 - poisson_cdf(lam, 2))
-    add("Goals", "Under 2.5 goals", poisson_cdf(lam, 2))
-    add("Goals", "Over 3.5 goals", 1.0 - poisson_cdf(lam, 3))
-    add("Goals", "Under 3.5 goals", poisson_cdf(lam, 3))
-    add("Goals", "Under 4.5 goals", poisson_cdf(lam, 4))
+        # Goals over/under (Poisson on expected total goals)
+        lam = match["lam_home"] + match["lam_away"]
+        add("Goals", "Over 1.5 goals", 1.0 - poisson_cdf(lam, 1))
+        add("Goals", "Over 2.5 goals", 1.0 - poisson_cdf(lam, 2))
+        add("Goals", "Under 2.5 goals", poisson_cdf(lam, 2))
+        add("Goals", "Over 3.5 goals", 1.0 - poisson_cdf(lam, 3))
+        add("Goals", "Under 3.5 goals", poisson_cdf(lam, 3))
+        add("Goals", "Under 4.5 goals", poisson_cdf(lam, 4))
 
-    # Both teams to score
-    btts = (1.0 - math.exp(-match["lam_home"])) * (1.0 - math.exp(-match["lam_away"]))
-    add("BTTS", "Both teams to score: Yes", btts)
-    add("BTTS", "Both teams to score: No", 1.0 - btts)
+        # Both teams to score
+        btts = (1.0 - math.exp(-match["lam_home"])) * (1.0 - math.exp(-match["lam_away"]))
+        add("BTTS", "Both teams to score: Yes", btts)
+        add("BTTS", "Both teams to score: No", 1.0 - btts)
 
     # Corners (league-average based prior; most matches clear 7.5 corners)
     if cfg.get("include_corners", True):

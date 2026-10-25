@@ -16,20 +16,41 @@ Handicap markets are never used. Football only.
   (free tier never expires: Premier League, Championship, Bundesliga, Serie A, La Liga,
   Ligue 1, Eredivisie, Primeira Liga, Brazilian Serie A, Champions League)
 
-Probabilities are computed from each team's goals scored/conceded in the league table
-(attack and defence strength vs. league average, plus home advantage). The older
-API-Football provider is still supported: set `"provider": "api-football"` and `api_key`.
+### How the picks are rated
+
+Each team's attack and defence strength comes from the goals it scored and conceded per
+game this season, compared with its league's average, and pulled toward **last season's**
+final table (a newly promoted team starts weaker than average). That gives expected goals
+for both sides, which become a probability for every market the app bets on (with a
+correction for the extra draws and 0-0/1-1 results that plain statistics miss).
+
+Those probabilities are then **calibrated** against how often such picks really won over
+~3,700 past matches in nine leagues. This matters: the uncalibrated model was overconfident
+on goals markets (it said 60-75% for outcomes that happened only about 50-65% of the time), and the ticket
+builder looks for exactly the picks it feels most sure about. The result:
+
+- **Match results** (home / away win, double chance): the model has real skill. It picks
+  the right result about half the time (50%), against 44% for always guessing a home win,
+  and its win probabilities are about right (a team given 70% wins about 70% of the time).
+- **Goals and both-teams-to-score**: only a small edge over the average rate. Treat these
+  picks as little better than a coin flip with a slight lean.
+- **Draws** are close to unpredictable.
+
+`python tools/backtest.py HISTORY_DIR` repeats this measurement (see *Checking the model*).
+The older API-Football provider is still supported: set `"provider": "api-football"` and
+`api_key`; it keeps its own probabilities and is not calibrated.
 
 ### European cups
 
-- **Champions League (`CL`)** is on the free plan. Once both teams have played 3+ cup
-  games (from about the 4th league-phase matchday) the cup table is used, as for any
-  league. Before that - and for any team short of games - the match is rated from each
-  team's **domestic league table**. A match is skipped (and the log says why) when a team
-  has neither, e.g. a club from Norway, Turkey or Scotland early in the competition.
-  The domestic fallback is an approximation: each team is measured against *its own*
-  league's average, so the model does not know how strong one league is compared with
-  another.
+- **Champions League (`CL`)** is on the free plan. When both clubs play in a domestic
+  league the app has a table for, the match is rated from their **domestic form**: on real
+  Champions League results this beat the cup table, which is too thin for most of the league
+  phase. The probabilities are then pulled a quarter of the way toward the average rate.
+  Only when a club has no domestic table (Norway, Turkey, Scotland, ...) does the app fall
+  back to the cup table, if both teams have 3+ cup games, pulled halfway to the average.
+  Otherwise the match is skipped and the log says why. Domestic form is an approximation: a
+  team is measured against *its own* league's average, so the model does not know how strong
+  one league is compared with another.
 - **Europa League (`EL`)** and **Conference League (`UCL`)** are in the `competitions`
   list, but football-data.org only serves them on a paid plan. On the free plan they
   simply produce no fixtures; if the API refuses them the log says "not available on your
@@ -113,11 +134,38 @@ Output of each run is appended to `run_log.txt`; every ticket is also saved in `
 | `league_ids` | Which leagues to scan (API-Football league IDs); empty = all |
 | `max_matches_analyzed` | Cap on fixtures analyzed per day (keeps within free API limits) |
 
-## Honest note on high-odds tickets
+## How often do tickets win?
 
-Combined odds of 30-50 across 5-7 matches need each pick at roughly 1.6-2.2 odds, i.e.
-about 42-57% likely. Multiplied together, such a ticket wins only around 1-3% of the time.
-The email shows the **ticket hit probability** so you always see the real number.
-For tickets that win more often, set `target_odds_min`/`target_odds_max` lower
-(e.g. 3-6) and raise `min_pick_probability` (e.g. 0.68). Corner probabilities are
-league-average priors, not per-match data. Odds are estimates; check your bookmaker.
+The default ticket (5-7 picks, combined odds 30-50) needs every pick to be right, and each
+pick is only about 45-55% likely, so it wins roughly **2-3% of the time** - about once every
+six weeks. No amount of modelling changes that; the combined odds do. We replayed the app's
+real ticket builder over every past match day (using only information available beforehand,
+and only matches still to be played at the 13:00 daily run):
+
+| Ticket type | `min_picks`/`max_picks` | `target_odds_min`-`max` | `min_pick_probability` | Won in the replay |
+|---|---|---|---|---|
+| Default | 5 / 7 | 30 - 50 | 0.42 | 6 of 191 (3%) |
+| 3 picks | 3 / 3 | 6 - 10 | 0.55 | 47 of 232 (20%) |
+| 3 picks | 3 / 3 | 4 - 6 | 0.60 | 45 of 219 (21%) |
+| 2 picks | 2 / 2 | 3 - 4 | 0.60 | 91 of 246 (37%) |
+| 2 picks | 2 / 2 | 2 - 2.6 | 0.65 | 109 of 235 (46%) |
+| 1 pick | 1 / 1 | 1.35 - 1.7 | 0.60 | 210 of 301 (70%) |
+
+Lower combined odds win more often, by definition. Notes:
+
+- **These odds are the app's own estimates, not bookmaker prices.** Real prices include the
+  bookmaker's margin (and are set by people with better information), so what you are paid
+  for a winning ticket is lower than the "odds" shown here. This is not a way to make money.
+- Each row is a few hundred tickets, so expect +/- 3 percentage points.
+- The **GitHub run reads `config.example.json`** (the real `config.json` is not committed),
+  so change the ticket type there.
+- Corner picks are league-average assumptions, not per-match data, and cannot be checked
+  against results; set `"include_corners": false` to leave them out.
+
+## Checking the model
+
+`tools/fetch_history.py` downloads finished matches (the manual "Fetch match history"
+workflow runs it with your token and saves them as a downloadable artifact), and
+`tools/backtest.py HISTORY_DIR [--tickets]` scores the app's own functions against them
+and prints whether the calibration table in `main.py` has gone stale. Re-run it each
+season; the table was fitted on the 2025 and 2026 seasons.

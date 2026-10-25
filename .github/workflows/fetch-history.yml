@@ -1,0 +1,32 @@
+name: Fetch match history (for back-testing)
+
+# Manual only. Downloads finished matches so the prediction model can be tested against
+# real results. Sends no email.
+on:
+  workflow_dispatch:
+    inputs:
+      seasons:
+        description: "Season start years, space separated (e.g. 2024 2025 2026)"
+        type: string
+        default: "2024 2025 2026"
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download results from football-data.org
+        env:
+          FOOTBALL_DATA_TOKEN: ${{ secrets.FOOTBALL_DATA_TOKEN }}
+          SEASONS: ${{ inputs.seasons }}
+        run: python3 tools/fetch_history.py history $SEASONS
+
+      - name: Keep the data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: history
+          path: history/
+          retention-days: 7
+          if-no-files-found: ignore

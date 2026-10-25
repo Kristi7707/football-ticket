@@ -136,31 +136,39 @@ Output of each run is appended to `run_log.txt`; every ticket is also saved in `
 
 ## How often do tickets win?
 
-The default ticket (5-7 picks, combined odds 30-50) needs every pick to be right, and each
-pick is only about 45-55% likely, so it wins roughly **2-3% of the time** - about once every
-six weeks. No amount of modelling changes that; the combined odds do. We replayed the app's
-real ticket builder over every past match day (using only information available beforehand,
-and only matches still to be played at the 13:00 daily run):
+A ticket wins only if every pick is right, so the more picks (and the higher the combined
+odds), the rarer the win. The default ticket (5-7 picks, combined odds 30-50) needs each
+pick to be only 45-55% likely and wins roughly **3% of the time** - about once every five
+weeks. No amount of modelling changes that; the number of picks does. We replayed the app's
+real ticket builder over every past match day (using only information available
+beforehand, and only matches still to be played at the 13:00 daily run), with these settings:
 
-| Ticket type | `min_picks`/`max_picks` | `target_odds_min`-`max` | `min_pick_probability` | Won in the replay |
-|---|---|---|---|---|
-| Default | 5 / 7 | 30 - 50 | 0.42 | 6 of 191 (3%) |
-| 3 picks | 3 / 3 | 6 - 10 | 0.55 | 47 of 232 (20%) |
-| 3 picks | 3 / 3 | 4 - 6 | 0.60 | 45 of 219 (21%) |
-| 2 picks | 2 / 2 | 3 - 4 | 0.60 | 91 of 246 (37%) |
-| 2 picks | 2 / 2 | 2 - 2.6 | 0.65 | 109 of 235 (46%) |
-| 1 pick | 1 / 1 | 1.35 - 1.7 | 0.60 | 210 of 301 (70%) |
+| Ticket | `min_picks`/`max_picks` | `target_odds_min`-`max` | `min_pick_probability` | Average combined odds | Won in the replay |
+|---|---|---|---|---|---|
+| 1 pick | 1 / 1 | 1.35 - 1.7 | 0.55 | 1.40 | 215 of 314 (68%) |
+| 2 picks | 2 / 2 | 2 - 2.6 | 0.60 | 2.00 | 105 of 246 (43%) |
+| 2 picks | 2 / 2 | 3 - 4 | 0.45 | 3.01 | 75 of 271 (28%) |
+| 3 picks | 3 / 3 | 3.5 - 5 | 0.58 | 3.41 | 45 of 219 (21%) |
+| 3 picks | 3 / 3 | 6 - 10 | 0.45 | 6.01 | 33 of 244 (14%) |
+| 5-7 picks (default) | 5 / 7 | 30 - 50 | 0.42 | 30.0 | 6 of 191 (3%) |
 
-Lower combined odds win more often, by definition. Notes:
+How to read this:
 
+- **The odds band must be reachable.** Each pick's odds are about 0.92 / its probability, so
+  two picks that must each be 60% likely can pay at most about 2.3x. To aim at odds of 3-4
+  with two picks, allow less likely picks (lower `min_pick_probability`). If the band cannot
+  be reached the builder uses the closest ticket and the run log says so.
 - **These odds are the app's own estimates, not bookmaker prices.** Real prices include the
   bookmaker's margin (and are set by people with better information), so what you are paid
-  for a winning ticket is lower than the "odds" shown here. This is not a way to make money.
-- Each row is a few hundred tickets, so expect +/- 3 percentage points.
+  for a winning ticket can be lower than shown. Over the replay, win rate x odds comes to
+  about 0.8-0.95 of the stake for every row: no row beats the margin, and this is not a way
+  to make money.
+- Each row is a few hundred tickets, so expect +/- 3 percentage points (more for the default
+  row, which won only 6 times).
 - The **GitHub run reads `config.example.json`** (the real `config.json` is not committed),
   so change the ticket type there.
 - Corner picks are league-average assumptions, not per-match data, and cannot be checked
-  against results; set `"include_corners": false` to leave them out.
+  against results; the replay left them out, so use `"include_corners": false` to match it.
 
 ## Checking the model
 

@@ -1,4 +1,4 @@
-"""Daily Football Ticket - analyzes today's fixtures and builds a 7-pick ticket.
+"""Daily Football Ticket - analyzes today's fixtures and builds a short ticket (3 picks by default).
 
 Markets used: 1X2, Double Chance, Over/Under goals, BTTS, Corners.
 Handicap markets are never used.
@@ -698,8 +698,8 @@ def combo_score(combo, cfg):
 
 
 def select_picks(matches, cfg):
-    """Find 5-7 picks (one per match) whose combined odds land in the target range,
-    maximizing the chance the whole ticket wins."""
+    """Find min_picks..max_picks picks (one per match, at most 7) whose combined odds land
+    in the target range, maximizing the chance the whole ticket wins."""
     import random
 
     per_match = []

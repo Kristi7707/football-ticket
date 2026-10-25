@@ -1,13 +1,14 @@
 # Daily Football Ticket
 
-Analyzes today's football fixtures, builds a ticket of **5-7 picks** with combined odds
-of about 30-50 (stake **10+**), saves it as an HTML file, and **emails it to you every day**.
+Analyzes today's football fixtures, builds a ticket of **3 picks** with combined odds
+of about 3.5-5 (stake **10+**), saves it as an HTML file, and **emails it to you every day**.
+In past match days such a ticket won about one time in five (see *How often do tickets win?*).
 
 On days without enough usable matches you get a short "no ticket today" email instead,
 so a quiet inbox never means a silent failure.
 
-Markets used: **1X2, Double Chance, Over/Under goals, BTTS, Corners**.
-Handicap markets are never used. Football only.
+Markets used: **1X2, Double Chance, Over/Under goals, BTTS** (Corners are supported but off by
+default). Handicap markets are never used. Football only.
 
 ## Requirements
 
@@ -126,31 +127,32 @@ Output of each run is appended to `run_log.txt`; every ticket is also saved in `
 | Setting | Meaning |
 |---|---|
 | `stake` | Ticket stake (minimum 10 is enforced) |
-| `min_picks` / `max_picks` | Picks per ticket (5 to 7, one per match) |
-| `target_odds_min` / `target_odds_max` | Combined odds the ticket should land in (default 30-50) |
-| `min_pick_probability` | Only picks at/above this confidence are considered (default 0.42) |
+| `min_picks` / `max_picks` | Picks per ticket (1 to 7, one per match; default 3) |
+| `target_odds_min` / `target_odds_max` | Combined odds the ticket should land in (default 3.5-5) |
+| `min_pick_probability` | Only picks at/above this confidence are considered (default 0.58) |
 | `min_odds_per_pick` | Skips picks whose odds would be too tiny (default 1.3) |
-| `include_corners` / `max_corners_picks` | Allow corner picks and cap how many |
+| `include_corners` / `max_corners_picks` | Allow corner picks (default off: they cannot be checked against results) and cap how many |
 | `league_ids` | Which leagues to scan (API-Football league IDs); empty = all |
 | `max_matches_analyzed` | Cap on fixtures analyzed per day (keeps within free API limits) |
 
 ## How often do tickets win?
 
 A ticket wins only if every pick is right, so the more picks (and the higher the combined
-odds), the rarer the win. The default ticket (5-7 picks, combined odds 30-50) needs each
-pick to be only 45-55% likely and wins roughly **3% of the time** - about once every five
-weeks. No amount of modelling changes that; the number of picks does. We replayed the app's
-real ticket builder over every past match day (using only information available
-beforehand, and only matches still to be played at the 13:00 daily run), with these settings:
+odds), the rarer the win. **The default is now 3 picks at about 3.4x, which won about one
+time in five.** The old default (5-7 picks, combined odds 30-50) needed each pick to be only
+45-55% likely and won roughly 3% of the time - about once every five weeks. No amount of
+modelling changes that; the number of picks does. We replayed the app's real ticket builder
+over every past match day (using only information available beforehand, and only matches
+still to be played at the 13:00 daily run), with these settings:
 
 | Ticket | `min_picks`/`max_picks` | `target_odds_min`-`max` | `min_pick_probability` | Average combined odds | Won in the replay |
 |---|---|---|---|---|---|
 | 1 pick | 1 / 1 | 1.35 - 1.7 | 0.55 | 1.40 | 215 of 314 (68%) |
 | 2 picks | 2 / 2 | 2 - 2.6 | 0.60 | 2.00 | 105 of 246 (43%) |
 | 2 picks | 2 / 2 | 3 - 4 | 0.45 | 3.01 | 75 of 271 (28%) |
-| 3 picks | 3 / 3 | 3.5 - 5 | 0.58 | 3.41 | 45 of 219 (21%) |
+| 3 picks (**default**) | 3 / 3 | 3.5 - 5 | 0.58 | 3.41 | 45 of 219 (21%) |
 | 3 picks | 3 / 3 | 6 - 10 | 0.45 | 6.01 | 33 of 244 (14%) |
-| 5-7 picks (default) | 5 / 7 | 30 - 50 | 0.42 | 30.0 | 6 of 191 (3%) |
+| 5-7 picks (old default) | 5 / 7 | 30 - 50 | 0.42 | 30.0 | 6 of 191 (3%) |
 
 How to read this:
 
@@ -163,12 +165,12 @@ How to read this:
   for a winning ticket can be lower than shown. Over the replay, win rate x odds comes to
   about 0.8-0.95 of the stake for every row: no row beats the margin, and this is not a way
   to make money.
-- Each row is a few hundred tickets, so expect +/- 3 percentage points (more for the default
+- Each row is a few hundred tickets, so expect +/- 3 percentage points (more for the 5-7 pick
   row, which won only 6 times).
 - The **GitHub run reads `config.example.json`** (the real `config.json` is not committed),
   so change the ticket type there.
 - Corner picks are league-average assumptions, not per-match data, and cannot be checked
-  against results; the replay left them out, so use `"include_corners": false` to match it.
+  against results; the replay left them out, so the default is `"include_corners": false`.
 
 ## Checking the model
 
